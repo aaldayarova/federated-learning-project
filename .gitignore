@@ -1,0 +1,10 @@
+# Virtual environments and Python cache
+fl_env/
+.vscode/
+__pycache__/
+
+# Data
+data/
+
+# Data or logs
+allfiles.txt
