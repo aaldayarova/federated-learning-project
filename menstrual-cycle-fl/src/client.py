@@ -10,7 +10,6 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from model import create_mlp_model, get_model_parameters, set_model_parameters
-from data_preprocessing import load_and_preprocess_data, simulate_federated_data_split
 
 class MenstrualCycleClient(fl.client.NumPyClient):
     """Flower client for menstrual cycle length prediction."""
@@ -30,15 +29,13 @@ class MenstrualCycleClient(fl.client.NumPyClient):
     
     def get_parameters(self, config: Dict) -> List[np.ndarray]:
         """Get model parameters."""
-        return [layer.get_weights() for layer in self.model.layers if len(layer.get_weights()) > 0]
+        # Use the model's built-in function that returns a flat list
+        return self.model.get_weights()
     
     def set_parameters(self, parameters: List[np.ndarray]) -> None:
         """Set model parameters."""
-        layer_idx = 0
-        for layer in self.model.layers:
-            if len(layer.get_weights()) > 0:
-                layer.set_weights(parameters[layer_idx])
-                layer_idx += 1
+        # Use the model's built-in function that accepts a flat list
+        self.model.set_weights(parameters)
     
     def fit(self, parameters: List[np.ndarray], config: Dict) -> Tuple[List[np.ndarray], int, Dict]:
         """Train the model on the client's data."""
@@ -59,12 +56,12 @@ class MenstrualCycleClient(fl.client.NumPyClient):
         )
         
         # Get updated parameters
-        updated_parameters = self.get_parameters({})
+        updated_parameters = self.model.get_weights()
         
         # Return updated parameters, number of examples, and metrics
         return updated_parameters, len(self.X_train), {
             "train_loss": float(history.history["loss"][-1]),
-            "train_mae": float(history.history["mean_absolute_error"][-1])
+            "train_mae": float(history.history["mae"][-1])
         }
     
     def evaluate(self, parameters: List[np.ndarray], config: Dict) -> Tuple[float, int, Dict]:
@@ -73,51 +70,61 @@ class MenstrualCycleClient(fl.client.NumPyClient):
         self.set_parameters(parameters)
         
         # Evaluate model
-        loss, mae, mse = self.model.evaluate(self.X_test, self.y_test, verbose=0)
+        loss, mae = self.model.evaluate(self.X_test, self.y_test, verbose=0)
+        rmse = np.sqrt(loss)
+
         
         return float(loss), len(self.X_test), {
             "test_mae": float(mae),
-            "test_mse": float(mse)
+             "rmse": float(rmse)
         }
 
 def main():
     """Main function to run the federated client."""
     parser = argparse.ArgumentParser(description='Federated Learning Client')
-    parser.add_argument('--client-id', type=int, default=0, help='Client ID')
-    parser.add_argument('--data-path', type=str, required=True, help='Path to CSV data file')
+
+    # We still need client-id and server-address
+    parser.add_argument('--client-id', type=int, required=True, help='Client ID (e.g., 0, 1, 2)')
     parser.add_argument('--server-address', type=str, default='localhost:8080', help='Server address')
-    
+
     args = parser.parse_args()
-    
-    # Load and preprocess data
-    print("Loading and preprocessing data...")
-    X_train, X_test, y_train, y_test, scaler, feature_names = load_and_preprocess_data(
-        args.data_path
-    )
-    
-    # Simulate federated data split (in practice, each client would have their own data)
-    print("Simulating federated data split...")
-    client_data = simulate_federated_data_split(X_train, y_train, num_clients=3)
-    
-    # Get this client's data
-    if args.client_id >= len(client_data):
-        print(f"Error: Client ID {args.client_id} is out of range. Available clients: 0-{len(client_data)-1}")
-        return
-    
-    X_train_client, y_train_client = client_data[args.client_id]
-    
+
+    # new data loading logic 
+    print(f"Client {args.client_id}: Loading pre-processed data...")
+
+    # Construct the file path for this client's specific data
+    client_data_path = f"fl_artifacts/client_{args.client_id}_data.npz"
+
+    try:
+        # Load this client's training data
+        client_data = np.load(client_data_path)
+        X_train_client, y_train_client = client_data["X_train"], client_data["y_train"]
+
+        # Load the global test set for evaluation
+        # All clients will evaluate on the same hold-out test set
+        test_data = np.load("fl_artifacts/global_test_set.npz")
+        X_test, y_test = test_data["X_test"], test_data["y_test"]
+
+    except FileNotFoundError as e:
+        print(f"\nERROR: Could not load data files from 'fl_artifacts/'. ({e})")
+        print("Please ensure you have run the 'prepare_data_for_fl.py' script first.\n")
+        sys.exit(1)
+
+    # Get the input dimension from the loaded training data
+    input_dim = X_train_client.shape[1]
+
     # Create client
     client = MenstrualCycleClient(
         client_id=args.client_id,
         X_train=X_train_client,
         y_train=y_train_client,
-        X_test=X_test,
-        y_test=y_test,
-        input_dim=X_train.shape[1]
+        X_test=X_test,  # Use the global test set
+        y_test=y_test,  # Use the global test set
+        input_dim=input_dim
     )
-    
+
     # Start client
-    print(f"Starting client {args.client_id}...")
+    print(f"Starting client {args.client_id} (Input dim: {input_dim})...")
     fl.client.start_numpy_client(
         server_address=args.server_address,
         client=client

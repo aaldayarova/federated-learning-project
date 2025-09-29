@@ -1,138 +1,168 @@
+# src/data_preprocessing.py
+
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+import joblib
 from sklearn.model_selection import train_test_split
-import logging
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-def load_and_preprocess_data(csv_path, target_column='LengthofCycle', test_size=0.2, random_state=42):
-    """
-    Load and preprocess the menstrual cycle data.
+# Helper function 
+
+def is_yes_like(x):
+    if pd.isna(x): return np.nan
+    return 1.0 if str(x).strip().lower() in {'y', 'yes', 'true', 't', '1'} else 0.0
+
+def squeeze_array(x):
+    return x.ravel()
+
+# Core pre-processing logic 
+
+def engineer_features(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Applies all cleaning and feature engineering steps."""
+    df = df_raw.copy()
     
-    Args:
-        csv_path (str): Path to the CSV file
-        target_column (str): Name of the target column
-        test_size (float): Proportion of data for testing
-        random_state (int): Random state for reproducibility
+    # Correct data types
+    df['CycleNumber'] = pd.to_numeric(df['CycleNumber'], errors='coerce')
+
+    # Coalesce paired columns
+    pair_fallbacks = [('Age', 'AgeM'), ('Maristatus', 'MaristatusM'), ('Religion', 'ReligionM'), 
+                      ('Ethnicity', 'EthnicityM'), ('Schoolyears', 'SchoolyearsM'), ('Medvits', 'MedvitsM'),
+                      ('Medvitexplain', 'MedvitexplainM'), ('Livingkids', 'LivingkidsM'), ('Nextpreg', 'NextpregM'),
+                      ('Spousesame', 'SpousesameM')]
+    for primary, fallback in pair_fallbacks:
+        if primary in df.columns and fallback in df.columns:
+            df[primary] = df[primary].fillna(df[fallback])
+            df = df.drop(columns=fallback, errors='ignore')
+
+    # Sort for time-series features
+    df = df.sort_values(['ClientID', 'CycleNumber']).reset_index(drop=True)
+
+    # Define Target Variable and drop rows where it's missing
+    df['LengthofCycle'] = pd.to_numeric(df['LengthofCycle'], errors='coerce')
+    df['next_cycle_length'] = df.groupby('ClientID')['LengthofCycle'].shift(-1)
+    df = df.dropna(subset=['next_cycle_length']).copy()
     
-    Returns:
-        tuple: (X_train, X_test, y_train, y_test, scaler, feature_names)
-    """
+    # Time-Series Features (Lags, Rolling, Expanding, EWMA)
+    for i in range(1, 4):
+        df[f'L{i}_LengthofCycle'] = df.groupby('ClientID')['LengthofCycle'].shift(i)
+    lag_cols = [f'L{i}_LengthofCycle' for i in range(1, 4)]
+    df['roll_mean_3_cycles'] = df[lag_cols].mean(axis=1)
+    df['roll_std_3_cycles'] = df[lag_cols].std(axis=1)
+    df['ewma_3_cycles'] = df.groupby('ClientID')['LengthofCycle'].transform(lambda x: x.shift(1).ewm(span=3, adjust=False).mean())
+    df['user_mean_cycle_length_so_far'] = df.groupby('ClientID')['LengthofCycle'].transform(lambda x: x.shift(1).expanding().mean())
+    df['user_std_cycle_length_so_far'] = df.groupby('ClientID')['LengthofCycle'].transform(lambda x: x.shift(1).expanding().std()).fillna(0)
+    df['user_cycle_count'] = df.groupby('ClientID').cumcount()
 
-    try:
-        # Load data
-        df = pd.read_csv(csv_path)
-        print(f"Data loaded successfully. Shape: {df.shape}")
-        print(f"Target column '{target_column}' statistics:")
-        print(df[target_column].describe())
+    # Text-Based Feature Engineering
+    if 'Gynosurgeries' in df.columns:
+        surg_text = df['Gynosurgeries'].astype(str).str.lower()
+        df['had_c_section'] = surg_text.str.contains('c-section|c section|cesarean', regex=True).astype(float)
+        df['had_d_and_c'] = surg_text.str.contains('d&c|d & c|d and c', regex=True).astype(float)
+        df['had_laparoscopy'] = surg_text.str.contains('laparoscopy|laproscopy', regex=True).astype(float)
 
-        # Handle missing values
-        df = handle_missing_values(df)
+    # Binary Flags
+    for col in ['CycleWithPeakorNot', 'IntercourseInFertileWindow', 'UnusualBleeding', 'Breastfeeding']:
+        if col in df.columns:
+            df[f'{col}_flag'] = df[col].apply(is_yes_like)
 
-        # Separate features and target
-        X = df.drop(columns=[target_column])
-        y = df[target_column]
+    # Correct data type for numerically-coded categoricals
+    cat_as_num_cols = ['Group', 'ReproductiveCategory', 'Maristatus', 'Religion', 'Ethnicity', 'Schoolyears', 'Reprocate', 'Method', 'Prevmethod', 'Whychart']
+    for col in cat_as_num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64').astype(str).replace('<NA>', np.nan)
+            
+    # Drop high-missingness and redundant columns
+    WHITELIST = {'Age', 'BMI', 'Abortions', 'Miscarriages', 'Numberpreg', 'Livingkids', 'Gynosurgeries', 'Urosurgeries', 'Medvits'}
+    missing_frac = df.isna().mean()
+    cols_to_drop_missing = missing_frac[(missing_frac > 0.9) & (~missing_frac.index.isin(WHITELIST))].index
+    cols_to_drop_other = ['CycleWithPeakorNot', 'IntercourseInFertileWindow', 'UnusualBleeding', 'Breastfeeding', 'LengthofCycle', 'CycleNumber']
+    all_cols_to_drop = list(cols_to_drop_missing) + [c for c in cols_to_drop_other if c in df.columns]
+    df = df.drop(columns=all_cols_to_drop, errors='ignore')
 
-        # Handle categorical variables
-        X = encode_categorical_features(X)
-
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_state
-        )
-
-        # Scale features
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        # Convert to numpy arrays
-        X_train_scaled = np.array(X_train_scaled, dtype=np.float32)
-        X_test_scaled = np.array(X_test_scaled, dtype=np.float32)
-        y_train = np.array(y_train, dtype=np.float32)
-        y_test = np.array(y_test, dtype=np.float32)
-
-        print(f"Training set shape: {X_train_scaled.shape}")
-        print(f"Test set shape: {X_test_scaled.shape}")
-        
-        return X_train_scaled, X_test_scaled, y_train, y_test, scaler, list(X.columns)
-    
-    except Exception as e:
-            print(f"Error in data preprocessing: {str(e)}")
-            raise
-
-def handle_missing_values(df):
-    """ Handle missing values in the dataset."""
-
-    # Check for missing values
-    missing_counts = df.isnull().sum()
-
-    if missing_counts.sum() > 0:
-        print(f"Missing values found: {missing_counts[missing_counts > 0]}")
-        
-        # For numerical columns, fill with median
-        numerical_cols = df.select_dtypes(include=[np.number]).columns
-        for col in numerical_cols:
-            if df[col].isnull().sum() > 0:
-                df[col].fillna(df[col].median(), inplace=True)
-        
-        # For categorical columns, fill with mode
-        categorical_cols = df.select_dtypes(include=['object']).columns
-        for col in categorical_cols:
-            if df[col].isnull().sum() > 0:
-                df[col].fillna(df[col].mode()[0], inplace=True)
-    
     return df
 
-def encode_categorical_features(X):
-    """Encode categorical features using label encoding."""
+def create_and_fit_preprocessor(df_train: pd.DataFrame):
+    """Creates the ColumnTransformer and fits it ONLY on the training data."""
     
-    X_encoded = X.copy()
+    target = 'next_cycle_length'
+    features_to_exclude = [target, 'ClientID']
+    all_features = [col for col in df_train.columns if col not in features_to_exclude]
     
-    # Identify categorical columns
-    categorical_cols = X_encoded.select_dtypes(include=['object']).columns
+    numeric_features = [col for col in all_features if pd.api.types.is_numeric_dtype(df_train[col])]
+    categorical_features = [col for col in all_features if pd.api.types.is_object_dtype(df_train[col]) or pd.api.types.is_categorical_dtype(df_train[col])]
+    text_features_raw = [c for c in ['Gynosurgeries', 'Urosurgeries', 'Medvitexplain'] if c in all_features]
     
-    if len(categorical_cols) > 0:
-        print(f"Encoding categorical features: {list(categorical_cols)}")
+    # Create combined text feature
+    if text_features_raw:
+        df_train['combined_text'] = df_train[text_features_raw].fillna('').agg(' '.join, axis=1)
+    else:
+        df_train['combined_text'] = ''
         
-        for col in categorical_cols:
-            le = LabelEncoder()
-            X_encoded[col] = le.fit_transform(X_encoded[col].astype(str))
-    
-    return X_encoded
+    text_features = ['combined_text']
+    categorical_features = [c for c in categorical_features if c not in text_features_raw]
 
-def simulate_federated_data_split(X_train, y_train, num_clients=3):
-    """
-    Simulate federated data distribution across multiple clients.
-    Each client gets a subset of the training data.
+    numeric_transformer = Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())])
+    categorical_transformer = Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))])
+    text_transformer = Pipeline([('imputer', SimpleImputer(strategy='constant', fill_value='')), ('squeeze', FunctionTransformer(squeeze_array)), ('tfidf', TfidfVectorizer(max_features=50, stop_words='english'))])
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', numeric_transformer, numeric_features),
+            ('cat', categorical_transformer, categorical_features),
+            ('text', text_transformer, text_features),
+        ],
+        remainder='drop'
+    )
     
-    Args:
-        X_train: Training features
-        y_train: Training targets
-        num_clients: Number of federated clients
+    # Fit the preprocessor
+    preprocessor.fit(df_train)
+
+    return preprocessor, numeric_features, categorical_features, text_features_raw
+
+def apply_preprocessing(df: pd.DataFrame, preprocessor, text_features_raw: list):
+    """Applies a fitted preprocessor to a dataframe."""
+    df_proc = df.copy()
     
-    Returns:
-        list: List of tuples (X_client, y_client) for each client
-    """
-    # Shuffle data
-    indices = np.random.permutation(len(X_train))
-    X_shuffled = X_train[indices]
-    y_shuffled = y_train[indices]
+    # Create combined text feature
+    if text_features_raw:
+        df_proc['combined_text'] = df_proc[text_features_raw].fillna('').agg(' '.join, axis=1)
+    else:
+        df_proc['combined_text'] = ''
+
+    features_df = df_proc.drop(columns=['next_cycle_length', 'ClientID'], errors='ignore')
     
-    # Split data among clients
+    X = preprocessor.transform(features_df)
+    y = df_proc['next_cycle_length'].values
+    
+    return X.astype(np.float32), y.astype(np.float32)
+
+def split_data_by_client(df: pd.DataFrame, test_size=0.3, val_size=0.5, random_state=42):
+    """Performs a user-level (non-IID) split."""
+    client_ids = df['ClientID'].dropna().unique()
+    train_clients, temp_clients = train_test_split(client_ids, test_size=test_size, random_state=random_state)
+    val_clients, test_clients = train_test_split(temp_clients, test_size=val_size, random_state=random_state)
+    
+    train_df = df[df['ClientID'].isin(train_clients)].copy()
+    val_df = df[df['ClientID'].isin(val_clients)].copy()
+    test_df = df[df['ClientID'].isin(test_clients)].copy()
+    
+    return train_df, val_df, test_df, train_clients, val_clients, test_clients
+
+def simulate_federated_data_split(train_df: pd.DataFrame, num_clients: int):
+    """Simulates a non-IID federated data split from the training dataframe."""
     client_data = []
-    data_per_client = len(X_train) // num_clients
+    user_ids = train_df['ClientID'].unique()
+    np.random.shuffle(user_ids)
+    
+    user_splits = np.array_split(user_ids, num_clients)
     
     for i in range(num_clients):
-        start_idx = i * data_per_client
-        if i == num_clients - 1:  # Last client gets remaining data
-            end_idx = len(X_train)
-        else:
-            end_idx = (i + 1) * data_per_client
+        client_user_ids = user_splits[i]
+        client_df = train_df[train_df['ClientID'].isin(client_user_ids)]
+        client_data.append(client_df)
         
-        X_client = X_shuffled[start_idx:end_idx]
-        y_client = y_shuffled[start_idx:end_idx]
-        
-        client_data.append((X_client, y_client))
-        print(f"Client {i}: {len(X_client)} samples")
-    
     return client_data

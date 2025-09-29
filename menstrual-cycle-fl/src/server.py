@@ -7,11 +7,11 @@ import sys
 import os
 from flwr.common import Metrics
 
+
 # Add src directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from model import create_mlp_model
-from data_preprocessing import load_and_preprocess_data
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     """Compute weighted average of metrics."""
@@ -68,11 +68,34 @@ class FedAvgStrategy(fl.server.strategy.FedAvg):
         
         return avg_loss, avg_metrics
 
-def server_evaluate(server_round: int, parameters, config) -> Optional[Tuple[float, Dict[str, float]]]:
-    """Optional server-side evaluation function."""
-    # This could be implemented if you have a global test set
-    # For now, we rely on client-side evaluation
-    return None
+def get_evaluate_fn():
+    """Return an evaluation function for server-side evaluation."""
+    try:
+        # Load the global test set from the artifacts directory
+        test_data = np.load("fl_artifacts/global_test_set.npz")
+        X_test, y_test = test_data["X_test"], test_data["y_test"]
+    except FileNotFoundError:
+        print("\nERROR: Global test set not found at 'fl_artifacts/global_test_set.npz'")
+        print("Please run the 'prepare_data_for_fl.py' script first.\n")
+        sys.exit(1)
+
+    # The inner function that will be called by Flower each round
+    def evaluate(server_round: int, parameters: fl.common.NDArrays, config: Dict[str, fl.common.Scalar]):
+        # Create a new model instance for evaluation
+        model = create_mlp_model(input_dim=X_test.shape[1])
+        # Set the global model weights sent by the server
+        model.set_weights(parameters)
+        # Evaluate the model on the global test set
+        loss, mae = model.evaluate(X_test, y_test, verbose=0)
+        rmse = np.sqrt(loss)
+
+        print(f"Server-side evaluation round {server_round}")
+        print(f"Loss: {loss:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+        # Return the loss and a dictionary of metrics
+        return loss, {"server_mae": mae, "server_rmse": rmse}
+
+    return evaluate
 
 def main():
     """Main function to run the federated server."""
@@ -81,19 +104,13 @@ def main():
     parser.add_argument('--min-clients', type=int, default=2, help='Minimum number of clients')
     parser.add_argument('--min-available-clients', type=int, default=2, help='Minimum available clients')
     parser.add_argument('--server-address', type=str, default='0.0.0.0:8080', help='Server address')
-    parser.add_argument('--data-path', type=str, required=True, help='Path to CSV data file for model initialization')
     
     args = parser.parse_args()
     
-    # Load data to get input dimensions for model initialization
-    print("Loading data to initialize model...")
-    X_train, X_test, y_train, y_test, scaler, feature_names = load_and_preprocess_data(
-        args.data_path
-    )
     
     # Create initial model to get parameters
-    initial_model = create_mlp_model(X_train.shape[1])
-    initial_parameters = [layer.get_weights() for layer in initial_model.layers if len(layer.get_weights()) > 0]
+    initial_model = create_mlp_model(input_dim=40)
+    initial_parameters = initial_model.get_weights()
     
     def get_initial_parameters():
         return initial_parameters
@@ -107,6 +124,7 @@ def main():
         min_available_clients=args.min_available_clients,
         initial_parameters=fl.common.ndarrays_to_parameters(initial_parameters),
         evaluate_metrics_aggregation_fn=weighted_average,
+        evaluate_fn=get_evaluate_fn(),  # Pass the server-side evaluation function
         on_fit_config_fn=lambda server_round: {
             "epochs": 5,
             "batch_size": 32,
@@ -115,8 +133,7 @@ def main():
     )
     
     print(f"Starting server on {args.server_address}")
-    print(f"Model input dimension: {X_train.shape[1]}")
-    print(f"Feature names: {feature_names}")
+    print("Model input dimension: 40 (based on pre-selected features)")
     print(f"Running for {args.rounds} rounds with minimum {args.min_clients} clients")
     
     # Start server
