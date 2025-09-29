@@ -17,17 +17,17 @@ from tensorflow.keras.regularizers import l2
 from data_preprocessing import engineer_features, split_data_by_client, create_and_fit_preprocessor, apply_preprocessing
 
 def main():
-    print("--- Running Centralized Baseline Model Training ---")
+    print("Running Centralized Baseline Model Training")
 
-    # 1. Load and Engineer Features
+    # Load and Engineer Features
     df_raw = pd.read_csv("FedCycleData071012 (2).csv", skipinitialspace=True)
     df_featured = engineer_features(df_raw)
 
-    # 2. Split Data by Client ID (non-IID)
+    # Split Data by Client ID (non-IID)
     train_df, val_df, test_df, _, _, _ = split_data_by_client(df_featured)
     print(f"Data split into Train: {train_df.shape[0]}, Val: {val_df.shape[0]}, Test: {test_df.shape[0]} samples.")
 
-    # 3. Data Clipping 
+    # Data Clipping 
     print("Clipping data based on training set quantiles...")
     clip_cols = ['next_cycle_length', 'L1_LengthofCycle', 'L2_LengthofCycle', 'L3_LengthofCycle', 'roll_mean_3_cycles', 'roll_std_3_cycles']
     for c in clip_cols:
@@ -38,10 +38,10 @@ def main():
                 if c in d.columns:
                     d[c] = d[c].clip(lo, hi)
 
-    # 4. Create and Fit Preprocessor on TRAINING data only
+    # Create and Fit Preprocessor on TRAINING data only
     preprocessor, numeric_features, categorical_features, text_cols_raw = create_and_fit_preprocessor(train_df)
     
-    # 4. Apply preprocessing to all splits
+    # Apply preprocessing to all splits
     X_train, y_train = apply_preprocessing(train_df, preprocessor, text_cols_raw)
     X_val, y_val = apply_preprocessing(val_df, preprocessor, text_cols_raw)
     X_test, y_test = apply_preprocessing(test_df, preprocessor, text_cols_raw)
@@ -49,7 +49,7 @@ def main():
 
     results = []
 
-    # Model 1: Random Forest 
+    # Random Forest 
     print("\nTraining Random Forest...")
     rf = RandomForestRegressor(n_estimators=200, min_samples_leaf=10, max_depth=15, max_features=0.7, random_state=42, n_jobs=-1)
     rf.fit(X_train, y_train)
@@ -59,7 +59,7 @@ def main():
     results.append({"Model": "Random Forest", "RMSE": rmse_rf, "MAE": mae_rf})
     print(f"  RF -> RMSE: {rmse_rf:.4f}, MAE: {mae_rf:.4f}")
 
-    # Model 2: XGBoost ---
+    # XGBoost 
     print("\nTraining XGBoost...")
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dval = xgb.DMatrix(X_val, label=y_val)
@@ -72,8 +72,7 @@ def main():
     results.append({"Model": "XGBoost", "RMSE": rmse_xgb, "MAE": mae_xgb})
     print(f"  XGBoost -> RMSE: {rmse_xgb:.4f}, MAE: {mae_xgb:.4f}")
 
-    # Model 3: MLP (Centralized) 
-    # First, get all feature names from the fitted preprocessor
+    # MLP (Centralized) 
     def get_feature_names_from_preprocessor(preprocessor, numeric_features, categorical_features):
         ohe_feature_names = preprocessor.named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
         # Check if text transformer exists and has features

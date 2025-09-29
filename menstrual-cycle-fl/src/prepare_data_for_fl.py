@@ -6,8 +6,6 @@ import joblib
 import os
 from sklearn.ensemble import RandomForestRegressor
 
-# IMPORTANT: Ensure your new data_preprocessing.py is in the 'src' folder
-# and accessible. Let's assume you've named it data_preprocessing_final.py to avoid confusion.
 from data_preprocessing import (
     engineer_features,
     split_data_by_client,
@@ -17,7 +15,7 @@ from data_preprocessing import (
 )
 
 def main():
-    print("--- Starting Data Preparation for Federated Learning ---")
+    print("Starting Data Preparation for Federated Learning")
 
     # Load and Engineer Features
     df_raw = pd.read_csv("FedCycleData071012 (2).csv", skipinitialspace=True)
@@ -36,7 +34,6 @@ def main():
                     d[c] = d[c].clip(lo, hi)
 
     # Create and Fit the Global Preprocessor
-    # This is a critical centralized step.
     preprocessor, numeric, categorical, text_raw = create_and_fit_preprocessor(train_df)
 
     # Apply Preprocessing to get Full Datasets 
@@ -45,7 +42,6 @@ def main():
     X_test, y_test = apply_preprocessing(test_df, preprocessor, text_raw)
 
     # Perform Centralized Feature Selection
-    # We train a temporary RF on the full training set to find the best features.
     print("Training temporary RF for feature selection...")
     rf_selector = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
     rf_selector.fit(X_train, y_train)
@@ -65,7 +61,6 @@ def main():
     top_idx = np.array([name_to_idx[f] for f in top_features])
 
     # Save Artifacts and Data 
-    # Create a directory to store these files
     os.makedirs('fl_artifacts', exist_ok=True)
 
     # Save the fitted preprocessor and top feature indices
@@ -81,7 +76,6 @@ def main():
     client_dfs = simulate_federated_data_split(train_df, num_clients=NUM_CLIENTS)
 
     for i, client_df in enumerate(client_dfs):
-        # Apply the SAME fitted preprocessor and feature selection to each client's data
         X_client, y_client = apply_preprocessing(client_df, preprocessor, text_raw)
         X_client_sel = X_client[:, top_idx]
         
