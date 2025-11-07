@@ -72,7 +72,7 @@ def main():
     np.savez('fl_artifacts/global_test_set.npz', X_test=X_test_sel, y_test=y_test)
     
     # Simulate and Save Data for Each Client 
-    NUM_CLIENTS = 3 # Or however many you want to simulate
+    NUM_CLIENTS = 10 # Or however many you want to simulate
     client_dfs = simulate_federated_data_split(train_df, num_clients=NUM_CLIENTS)
 
     for i, client_df in enumerate(client_dfs):

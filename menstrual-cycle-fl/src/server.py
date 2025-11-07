@@ -121,7 +121,7 @@ def main():
         fraction_evaluate=1.0,  # Use all available clients for evaluation
         min_fit_clients=args.min_clients,
         min_evaluate_clients=args.min_clients,
-        min_available_clients=args.min_available_clients,
+        min_available_clients=args.min_clients,
         initial_parameters=fl.common.ndarrays_to_parameters(initial_parameters),
         evaluate_metrics_aggregation_fn=weighted_average,
         evaluate_fn=get_evaluate_fn(),  # Pass the server-side evaluation function
